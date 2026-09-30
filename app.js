@@ -278,6 +278,12 @@ function renderPreview() {
       <div class="bubble"><div class="speaker">${escapeHtml(m.speaker)}</div>${escapeHtml(m.text)}</div>
     </div>`).join('');
 }
+function setHeadlessConfigurationNote() {
+  const el = $('agentNote');
+  if (!el || !state.user) return;
+  el.textContent = 'Signed in. Use a Messenger configuration with native UI OFF and Automatically Start Conversations OFF. This generator starts each customer conversation explicitly.';
+}
+
 function updateAgentNote() {
   const selected = $('agentSelect').value;
   $('agentNote').textContent = selected === state.user?.id
@@ -303,13 +309,6 @@ function ensureGenesysQueue() {
 function subscribeMessengerEvents() {
   const Genesys = ensureGenesysQueue();
 
-  Genesys('subscribe', 'MessagingService.messagesReceived', (event) => {
-    console.debug('[Synthetic] MessagingService.messagesReceived', event);
-    const messages = event?.data?.messages || [];
-    for (const message of messages) {
-      if (message?.id) state.latestCustomerMessageId = message.id;
-    }
-  });
 
   Genesys('subscribe', 'MessagingService.started', (event) => {
     console.debug('[Synthetic] MessagingService.started', event);
@@ -403,41 +402,33 @@ async function setCustomerData(customer, scenario, conversation, queue) {
 }
 
 async function prepareNewMessengerSession() {
-  // The Messenger configuration determines whether the customer session is
-  // auto-started. Do NOT call configureConversation first when autoStart is on:
-  // Genesys will already have an active conversation/session and configureConversation
-  // is rejected with "There is already an active conversation."
-  //
-  // For autoStart deployments, joinConversation is the correct command.
-  // For non-autoStart deployments, configureConversation establishes the session
-  // and the first sendMessage starts the customer conversation.
-
-  try { await messengerCommand('MessagingService.disconnectConversation', {}, 8000); } catch (e) {
-    console.debug('[Synthetic] no previous conversation to disconnect', e.message);
-  }
-  try { await messengerCommand('MessagingService.clearConversation', {}, 8000); } catch (e) {
-    console.debug('[Synthetic] no previous conversation to clear', e.message);
-  }
+  // Deterministic mode for this static demo generator:
+  // Native Messenger UI = OFF
+  // Automatically Start Conversations = OFF
+  // Sequence = configureConversation -> sendMessage
+  // We deliberately do not use the auto-start/join path here.
 
   state.latestCustomerMessageId = null;
   state.lastMessengerError = null;
   state.messengerConfigured = false;
 
-  // Prefer joinConversation. It is required when Messenger auto-start is enabled.
+  // End/clear any previous demo session. With auto-start OFF it will not
+  // immediately recreate itself while we prepare the next run.
   try {
-    const joined = await messengerCommand('MessagingService.joinConversation', {}, 15000);
-    state.messengerConfigured = true;
-    console.debug('[Synthetic] joinConversation', joined);
-    return joined;
-  } catch (joinError) {
-    console.debug('[Synthetic] joinConversation not available; trying configureConversation.', joinError.message);
+    await messengerCommand('MessagingService.disconnectConversation', {}, 8000);
+  } catch (e) {
+    console.debug('[Synthetic] no previous conversation to disconnect:', e.message);
   }
+  try {
+    await messengerCommand('MessagingService.clearConversation', {}, 8000);
+  } catch (e) {
+    console.debug('[Synthetic] no previous conversation to clear:', e.message);
+  }
+  await sleep(750);
 
-  // Auto-start is disabled: configure the headless session and let sendMessage
-  // create/start the conversation. Do not call startConversation afterwards.
-  const configured = await messengerCommand('MessagingService.configureConversation', {}, 15000);
+  const configured = await messengerCommand('MessagingService.configureConversation', {}, 20000);
   state.messengerConfigured = true;
-  console.debug('[Synthetic] configureConversation', configured);
+  console.debug('[Synthetic] configureConversation succeeded:', configured);
   return configured;
 }
 
@@ -471,16 +462,32 @@ async function waitForCustomerMessageId(timeoutMs = 20000) {
   return null;
 }
 
-async function getConversationFromFirstMessage(fallbackCommandResult) {
-  const eventMessageId = await waitForCustomerMessageId(15000);
-  const candidates = [
-    eventMessageId,
-    fallbackCommandResult?.id,
-    fallbackCommandResult?.messageId,
-    fallbackCommandResult?.message?.id,
-  ].filter(Boolean);
+function collectPotentialIds(value, out = []) {
+  if (!value) return out;
+  if (typeof value === 'string') {
+    if (value.length >= 20) out.push(value);
+    return out;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectPotentialIds(item, out);
+    return out;
+  }
+  if (typeof value === 'object') {
+    for (const [key, child] of Object.entries(value)) {
+      if (/^(id|messageId|conversationId)$/i.test(key) && typeof child === 'string') {
+        out.push(child);
+      } else if (/message|data|result|response|conversation/i.test(key)) {
+        collectPotentialIds(child, out);
+      }
+    }
+  }
+  return out;
+}
 
-  for (const id of [...new Set(candidates)]) {
+async function getConversationFromFirstMessage(sendResult) {
+  const candidates = [...new Set(collectPotentialIds(sendResult))];
+  console.debug('[Synthetic] IDs returned by sendMessage:', candidates, sendResult);
+  for (const id of candidates) {
     const conversationId = await resolveConversationFromMessage(id);
     if (conversationId) return conversationId;
   }
@@ -542,7 +549,7 @@ async function createConversation(conversation) {
   const firstSendResult = await sendCustomer(conversation.messages[0].text);
   const conversationId = await getConversationFromFirstMessage(firstSendResult);
   if (!conversationId) {
-    throw new Error('The customer message was sent, but Genesys did not expose a resolvable message ID/conversation ID. Check the browser console and confirm the Messenger deployment is active with the inbound message flow.');
+    throw new Error('Customer message was sent, but this browser build could not resolve the resulting message to a conversation ID. The app will not retry configuration or create a second session. Check the browser console for the sendMessage result.');
   }
 
   state.currentConversationId = conversationId;
@@ -666,6 +673,7 @@ async function boot() {
     populate($('queueSelect'), queues, 'Select queue...');
     renderScenarioOptions();
     updateAgentNote();
+  setHeadlessConfigurationNote();
 
     $('loginPanel').classList.add('hidden');
     $('app').classList.remove('hidden');
