@@ -403,32 +403,42 @@ async function setCustomerData(customer, scenario, conversation, queue) {
 }
 
 async function prepareNewMessengerSession() {
-  // Always terminate/clear an earlier browser session so every click can create a new interaction.
-  try { await messengerCommand('MessagingService.disconnectConversation', {}, 8000); } catch {}
-  try { await messengerCommand('MessagingService.clearConversation', {}, 8000); } catch {}
+  // The Messenger configuration determines whether the customer session is
+  // auto-started. Do NOT call configureConversation first when autoStart is on:
+  // Genesys will already have an active conversation/session and configureConversation
+  // is rejected with "There is already an active conversation."
+  //
+  // For autoStart deployments, joinConversation is the correct command.
+  // For non-autoStart deployments, configureConversation establishes the session
+  // and the first sendMessage starts the customer conversation.
+
+  try { await messengerCommand('MessagingService.disconnectConversation', {}, 8000); } catch (e) {
+    console.debug('[Synthetic] no previous conversation to disconnect', e.message);
+  }
+  try { await messengerCommand('MessagingService.clearConversation', {}, 8000); } catch (e) {
+    console.debug('[Synthetic] no previous conversation to clear', e.message);
+  }
 
   state.latestCustomerMessageId = null;
   state.lastMessengerError = null;
   state.messengerConfigured = false;
 
-  // configureConversation establishes/restores the websocket/session state used by the SDK.
-  const configResult = await messengerCommand('MessagingService.configureConversation', {}, 15000);
-  state.messengerConfigured = true;
-  console.debug('[Synthetic] configureConversation', configResult);
-
-  // A deployment with autoStart/join behaviour may already have an active session.
-  if (configResult?.isSessionActive || configResult?.newSession === false) {
-    return configResult;
-  }
-
-  // For a normal non-auto-start deployment, start the customer conversation after the SDK is ready.
+  // Prefer joinConversation. It is required when Messenger auto-start is enabled.
   try {
-    return await messengerCommand('MessagingService.startConversation', {}, 15000);
-  } catch (startError) {
-    // Some headless deployments use autoStart and require joinConversation instead.
-    console.warn('[Synthetic] startConversation failed; trying joinConversation.', startError);
-    return await messengerCommand('MessagingService.joinConversation', {}, 15000);
+    const joined = await messengerCommand('MessagingService.joinConversation', {}, 15000);
+    state.messengerConfigured = true;
+    console.debug('[Synthetic] joinConversation', joined);
+    return joined;
+  } catch (joinError) {
+    console.debug('[Synthetic] joinConversation not available; trying configureConversation.', joinError.message);
   }
+
+  // Auto-start is disabled: configure the headless session and let sendMessage
+  // create/start the conversation. Do not call startConversation afterwards.
+  const configured = await messengerCommand('MessagingService.configureConversation', {}, 15000);
+  state.messengerConfigured = true;
+  console.debug('[Synthetic] configureConversation', configured);
+  return configured;
 }
 
 async function sendCustomer(text) {
