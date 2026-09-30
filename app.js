@@ -2,6 +2,10 @@ const CONFIG_KEY = 'syntheticConversations.config.v2';
 const TOKEN_KEY = 'syntheticConversations.token.v2';
 const PKCE_KEY = 'syntheticConversations.pkce.v2';
 
+const platformClient = window.platformClient || (typeof require === 'function' ? require('platformClient') : null);
+if (!platformClient) throw new Error('Genesys Cloud Platform SDK did not load.');
+const client = platformClient.ApiClient.instance;
+
 const state = {
   config: loadConfig(), token: null, user: null, users: [], queues: [],
   scenarios: [], created: [], messengerLoaded: false, messengerReady: false,
@@ -30,23 +34,71 @@ function setProgress(p,msg){$('progress').classList.remove('hidden');$('progress
 function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
 function escapeHtml(v){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}
 
-async function startLogin(e){e?.preventDefault();
-  state.config.region=$('loginRegion').value; state.config.clientId=$('oauthClientId').value.trim(); state.config.deploymentId=$('deploymentId').value.trim(); saveConfig();
-  if(!state.config.clientId || !state.config.deploymentId){showLoginMessage('Enter the OAuth client ID and Messenger deployment ID.');return}
-  const verifier=randomString(64), oauthState=randomString(18); sessionStorage.setItem(PKCE_KEY,JSON.stringify({verifier,oauthState,...state.config,redirectUri:redirectUri()}));
-  const url=new URL(`${loginHost()}/oauth/authorize`); url.searchParams.set('client_id',state.config.clientId);url.searchParams.set('response_type','code');url.searchParams.set('redirect_uri',redirectUri());url.searchParams.set('code_challenge',await challengeFor(verifier));url.searchParams.set('code_challenge_method','S256');url.searchParams.set('state',oauthState);
-  location.assign(url.toString());
+function configureClient(){
+  const hosts={
+    'usw2.pure.cloud':platformClient.PureCloudRegionHosts.us_west_2,
+    'usw1.pure.cloud':platformClient.PureCloudRegionHosts.us_west_1,
+    'use1.pure.cloud':platformClient.PureCloudRegionHosts.us_east_1,
+    'cac1.pure.cloud':platformClient.PureCloudRegionHosts.ca_central_1,
+    'mypurecloud.ie':platformClient.PureCloudRegionHosts.eu_west_1,
+    'mypurecloud.de':platformClient.PureCloudRegionHosts.eu_central_1,
+    'mypurecloud.com.au':platformClient.PureCloudRegionHosts.ap_southeast_2,
+    'mypurecloud.jp':platformClient.PureCloudRegionHosts.ap_northeast_1
+  };
+  const host=hosts[state.config.region];
+  if(!host)throw new Error(`Unsupported Genesys Cloud region: ${state.config.region}`);
+  client.setEnvironment(host);
+  if(typeof client.setPersistSettings==='function') client.setPersistSettings(false);
 }
-async function handleOAuthCallback(){const p=new URLSearchParams(location.search);const code=p.get('code'),err=p.get('error');if(!code&&!err)return false;const saved=JSON.parse(sessionStorage.getItem(PKCE_KEY)||'{}');history.replaceState({},document.title,redirectUri());if(err)throw new Error(p.get('error_description')||`OAuth failed: ${err}`);if(!saved.verifier||p.get('state')!==saved.oauthState)throw new Error('OAuth state validation failed.');
-  const body=new URLSearchParams({grant_type:'authorization_code',client_id:saved.clientId,code,redirect_uri:saved.redirectUri,code_verifier:saved.verifier});const r=await fetch(`${loginHostFrom(saved.region)}/oauth/token`,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});if(!r.ok)throw new Error(`Token exchange failed (${r.status}). Check PKCE client and redirect URI.`);
-  const token=await r.json();token.expiresAt=Date.now()+((token.expires_in||3600)*1000)-60000;state.config={region:saved.region,clientId:saved.clientId,deploymentId:saved.deploymentId};state.token=token;sessionStorage.setItem(TOKEN_KEY,JSON.stringify({config:state.config,token}));sessionStorage.removeItem(PKCE_KEY);saveConfig();return true;
-}
-function loginHostFrom(r){return `https://login.${r}`}
-function restoreSession(){try{const x=JSON.parse(sessionStorage.getItem(TOKEN_KEY)||'{}');if(x.token?.access_token&&x.token.expiresAt>Date.now()){state.config=x.config||state.config;state.token=x.token;return true}}catch{}return false}
-function logout(){sessionStorage.removeItem(TOKEN_KEY);sessionStorage.removeItem(PKCE_KEY);state.token=null;location.assign(redirectUri())}
 function showLoginMessage(msg){$('configWarning').textContent=msg;$('configWarning').classList.remove('hidden')}
+function clearLoginMessage(){$('configWarning').textContent='';$('configWarning').classList.add('hidden')}
+function authData(){return client.authData||{}}
+function isAuthenticated(){return !!authData().accessToken}
 
-async function gcFetch(method,path,payload=null){if(!state.token?.access_token)throw new Error('Not authenticated');const r=await fetch(`${apiHost()}${path}`,{method,headers:{Authorization:`Bearer ${state.token.access_token}`,'Content-Type':'application/json'},body:payload?JSON.stringify(payload):undefined});const t=await r.text();let d={};try{d=t?JSON.parse(t):{}}catch{d={message:t}}if(!r.ok)throw new Error(d.message||d.error||`Genesys API error ${r.status}`);return d}
+async function startLogin(e){e?.preventDefault();clearLoginMessage();
+  state.config.region=$('loginRegion').value;
+  state.config.clientId=$('oauthClientId').value.trim();
+  state.config.deploymentId=$('deploymentId').value.trim();
+  saveConfig();
+  if(!state.config.clientId){showLoginMessage('Enter your Genesys Cloud OAuth client ID.');$('oauthClientId').focus();return}
+  try{
+    configureClient();
+    $('loginBtn').disabled=true;$('loginBtn').textContent='Opening Genesys login...';
+    await client.loginPKCEGrant(state.config.clientId,redirectUri(),{state:crypto.randomUUID(),skipTest:true});
+    await onAuthenticated();
+  }catch(err){
+    console.error('Genesys PKCE login failed',err);
+    $('loginBtn').disabled=false;$('loginBtn').textContent='Sign in with Genesys';
+    showLoginMessage(formatAuthError(err));
+  }
+}
+function formatAuthError(err){
+  const msg=err?.message||String(err||'Unknown authentication error');
+  if(/redirect/i.test(msg))return `${msg} Make sure this exact URL is listed under Authorized redirect URIs: ${redirectUri()}`;
+  return msg;
+}
+async function onAuthenticated(){
+  if(!isAuthenticated())throw new Error('Genesys login completed but no access token was returned.');
+  clearLoginMessage();
+  const me=await gcFetch('GET','/api/v2/users/me');
+  state.user=me;
+  $('identityBadge').textContent=me.name||'Signed in';$('identityBadge').className='badge live';
+  const [users,queues,scenarios]=await Promise.all([
+    fetchEntities('/api/v2/users?state=active'),
+    fetchEntities('/api/v2/routing/queues'),
+    fetch('scenarios/scenarios.json').then(r=>{if(!r.ok)throw new Error('Could not load scenario library.');return r.json()})
+  ]);
+  state.users=users;state.queues=queues;state.scenarios=scenarios.scenarios||[];
+  populate($('agentSelect'),users,'Select agent...',x=>`${x.name}${x.id===me.id?' (You)':''}`);$('agentSelect').value=me.id;
+  populate($('queueSelect'),queues,'Select queue...');renderScenarioOptions();updateAgentNote();
+  $('loginPanel').classList.add('hidden');$('app').classList.remove('hidden');$('loginBtn').classList.add('hidden');$('logoutBtn').classList.remove('hidden');
+}
+function logout(){
+  try{if(typeof client.setAccessToken==='function')client.setAccessToken(null)}catch(e){}
+  sessionStorage.removeItem(PKCE_KEY);location.assign(redirectUri());
+}
+
+async function gcFetch(method,path,payload=null){const token=authData().accessToken;if(!token)throw new Error('Not authenticated');const r=await fetch(`${apiHost()}${path}`,{method,headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:payload?JSON.stringify(payload):undefined});const t=await r.text();let d={};try{d=t?JSON.parse(t):{}}catch{d={message:t}}if(!r.ok)throw new Error(d.message||d.error||`Genesys API error ${r.status}`);return d}
 async function fetchEntities(path){const all=[];for(let n=1;n<=25;n++){const join=path.includes('?')?'&':'?';const d=await gcFetch('GET',`${path}${join}pageSize=100&pageNumber=${n}`);const rows=d.entities||[];all.push(...rows);if(!d.nextUri||rows.length<100)break}return all}
 
 function selectedScenario(){return state.scenarios.find(s=>s.id===$('scenarioSelect').value)||null}
@@ -124,10 +176,26 @@ function toggle(disabled){$('createBtn').disabled=disabled;$('batchBtn').disable
 function renderHistory(){if(!state.created.length){$('history').className='history-empty';$('history').textContent='No synthetic conversations created yet.';return}$('history').className='';$('history').innerHTML=state.created.map(x=>`<div class="history-item"><div class="history-main"><strong>${escapeHtml(x.scenario)} — ${escapeHtml(x.conversation)}</strong><div class="history-meta">${escapeHtml(x.outcome)} · ${escapeHtml(x.customer?.name||'Synthetic Customer')}</div></div><div class="history-id">${escapeHtml(x.conversationId||'')}</div></div>`).join('')}
 
 async function boot(){
-  $('loginRegion').value=state.config.region||'usw2.pure.cloud';$('oauthClientId').value=state.config.clientId||'';$('deploymentId').value=state.config.deploymentId||'';$('redirectUri').textContent=redirectUri();
-  try{await handleOAuthCallback();restoreSession();if(!state.token)return;const [me,users,queues,scenarios]=await Promise.all([gcFetch('GET','/api/v2/users/me'),fetchEntities('/api/v2/users?state=active'),fetchEntities('/api/v2/routing/queues'),fetch('scenarios/scenarios.json').then(r=>r.json())]);state.user=me;state.users=users;state.queues=queues;state.scenarios=scenarios.scenarios||[];populate($('agentSelect'),users,'Select agent...',x=>`${x.name}${x.id===me.id?' (You)':''}`);$('agentSelect').value=me.id;populate($('queueSelect'),queues,'Select queue...');renderScenarioOptions();updateAgentNote();$('loginPanel').classList.add('hidden');$('app').classList.remove('hidden');$('loginBtn').classList.add('hidden');$('logoutBtn').classList.remove('hidden');$('identityBadge').textContent=me.name;$('identityBadge').className='badge live';
-    // Load Messenger only when the first conversation is created, avoiding a customer session on page load.
-  }catch(e){console.error(e);showLoginMessage(e.message)}
+  $('loginRegion').value=state.config.region||'usw2.pure.cloud';
+  $('oauthClientId').value=state.config.clientId||'';
+  $('deploymentId').value=state.config.deploymentId||'';
+  $('redirectUri').textContent=redirectUri();
+  try{
+    configureClient();
+    const params=new URLSearchParams(location.search);
+    if(params.has('code')||params.has('error')){
+      $('loginBtn').disabled=true;$('loginBtn').textContent='Completing Genesys login...';
+      await client.loginPKCEGrant(state.config.clientId,redirectUri(),{skipTest:true});
+      history.replaceState({},document.title,redirectUri());
+      await onAuthenticated();
+      return;
+    }
+    if(isAuthenticated()) await onAuthenticated();
+  }catch(e){
+    console.error('OAuth startup failed',e);
+    try{history.replaceState({},document.title,redirectUri())}catch(x){}
+    showLoginMessage(formatAuthError(e));
+    $('loginBtn').disabled=false;$('loginBtn').textContent='Sign in with Genesys';
+  }
 }
-
 document.addEventListener('DOMContentLoaded',()=>{$('loginBtn').addEventListener('click',startLogin);$('logoutBtn').addEventListener('click',logout);$('scenarioSelect').addEventListener('change',renderConversationOptions);$('conversationSelect').addEventListener('change',renderPreview);$('agentSelect').addEventListener('change',updateAgentNote);$('createBtn').addEventListener('click',handleCreate);$('batchBtn').addEventListener('click',handleBatch);boot()});

@@ -93,6 +93,11 @@
     </section>
   </main>
 
+  <script src="https://sdk-cdn.mypurecloud.com/javascript/263.1.0/purecloud-platform-client-v2.min.js"></script>
+  <script>
+    // The Genesys SDK browser bundle exposes CommonJS require(). Store the SDK globally for app.js.
+    window.platformClient = require('platformClient');
+  </script>
   <script src="app.js" defer></script>
 </body>
 </html>
