@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Genesys Synthetic Conversations</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="header">
+      <div>
+        <div class="eyebrow">GENESYS CLOUD DEMO TOOL</div>
+        <h1>Synthetic Conversations</h1>
+        <p>Generate realistic customer/agent messaging interactions for demos, STA and QM testing.</p>
+      </div>
+      <div class="header-actions">
+        <span id="identityBadge" class="badge muted">Not signed in</span>
+        <button id="loginBtn" class="button primary">Sign in with Genesys</button>
+        <button id="logoutBtn" class="button secondary hidden">Sign out</button>
+      </div>
+    </header>
+
+    <section id="loginPanel" class="card login-card">
+      <h2>Connect to your Genesys Cloud org</h2>
+      <p>Use the same browser-only PKCE approach as the QM Dashboard. Client ID and deployment ID are configuration values, not secrets.</p>
+      <div class="config-grid">
+        <label>Genesys Cloud region
+          <select id="loginRegion">
+            <option value="usw2.pure.cloud">US West 2</option>
+            <option value="usw1.pure.cloud">US West 1</option>
+            <option value="use1.pure.cloud">US East 1</option>
+            <option value="cac1.pure.cloud">Canada</option>
+            <option value="mypurecloud.ie">EU West 1</option>
+            <option value="mypurecloud.de">EU Central 1</option>
+            <option value="mypurecloud.com.au">Australia East</option>
+            <option value="mypurecloud.jp">Japan</option>
+          </select>
+        </label>
+        <label>OAuth client ID
+          <input id="oauthClientId" autocomplete="off" placeholder="Enter the PKCE client ID">
+        </label>
+        <label>Messenger deployment ID
+          <input id="deploymentId" autocomplete="off" placeholder="Enter the Web Messaging deployment ID">
+        </label>
+      </div>
+      <div class="notice info">Redirect URI for this deployment: <code id="redirectUri"></code></div>
+      <div id="configWarning" class="notice warning hidden"></div>
+    </section>
+
+    <section id="app" class="hidden">
+      <div class="grid">
+        <aside class="card controls">
+          <div class="section-title">Conversation setup</div>
+          <label>Scenario<select id="scenarioSelect"></select></label>
+          <label>Conversation<select id="conversationSelect"></select></label>
+          <label>Agent<select id="agentSelect"></select></label>
+          <label>Routing queue<select id="queueSelect"></select></label>
+          <div class="customer-card">
+            <div class="customer-label">Customer</div>
+            <div id="customerName" class="customer-name">-</div>
+            <div id="customerProfile" class="customer-profile">-</div>
+          </div>
+          <div id="agentNote" class="notice info"></div>
+          <div id="routingNote" class="notice warning">The Messenger deployment controls routing. The selected queue is recorded as synthetic metadata; use an Architect inbound-message flow to route dynamically from that attribute.</div>
+          <label class="check"><input id="includeTyping" type="checkbox" checked> Add natural pacing between messages</label>
+          <label class="check"><input id="autoDisconnect" type="checkbox" checked> Disconnect after final message</label>
+          <button id="createBtn" class="button success full">Create real conversation</button>
+          <button id="batchBtn" class="button secondary full">Create 3 variants</button>
+        </aside>
+
+        <section class="card transcript-card">
+          <div class="transcript-head">
+            <div>
+              <div class="section-title">Preview</div>
+              <h2 id="conversationTitle">Select a conversation</h2>
+            </div>
+            <span id="status" class="badge muted">Ready</span>
+          </div>
+          <div id="characteristics" class="chips"></div>
+          <div id="preview" class="preview"></div>
+          <div id="progress" class="progress hidden">
+            <div class="progress-bar"><div id="progressFill"></div></div>
+            <div id="progressText">Preparing...</div>
+          </div>
+        </section>
+      </div>
+
+      <section class="card history-card">
+        <div class="section-title">Created this session</div>
+        <div id="history" class="history-empty">No synthetic conversations created yet.</div>
+      </section>
+    </section>
+  </main>
+
+  <script src="app.js" defer></script>
+</body>
+</html>
